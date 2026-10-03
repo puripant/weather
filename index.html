@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Weather Clock</title>
+<style>
+  :root {
+    --bg: #f6f5f1; --fg: #1c1c1e; --muted: #8a8a8e; --rain: #2f7fe0;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111214; --fg: #f2f2f3; --muted: #77787d; --rain: #58a6ff; }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    min-height: 100dvh; margin: 0;
+    background: var(--bg); color: var(--fg);
+    font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Sukhumvit Set", sans-serif;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 12px; padding: 16px;
+  }
+  button {
+    font: inherit; color: var(--muted); background: none; border: 0; padding: 6px 10px;
+    cursor: pointer; letter-spacing: .08em; text-transform: uppercase; font-size: 12px;
+  }
+  button:hover, button[aria-pressed="true"] { color: var(--fg); }
+  svg { width: min(92vw, 70vh, 520px); height: auto; display: block; }
+  svg text { fill: var(--fg); text-anchor: middle; dominant-baseline: central; font-variant-numeric: tabular-nums; }
+  .label { font-size: 7.5px; }
+  .now-temp { font-size: 30px; font-weight: 200; }
+  .now-rain { font-size: 7px; fill: var(--rain); }
+  .tick { stroke: var(--rain); stroke-width: 1.6; stroke-linecap: round; }
+  .hand { stroke: var(--fg); stroke-width: 1; stroke-linecap: round; }
+
+  #cal { width: min(100%, 520px); display: grid; font-variant-numeric: tabular-nums; }
+  .name.today, .day.today .date { font-weight: 600; }
+  .bar { height: 3px; border-radius: 2px; background: color-mix(in srgb, var(--rain) 16%, transparent); }
+  .bar i { display: block; height: 100%; border-radius: 2px; background: var(--rain); }
+  .pct { color: var(--rain); }
+
+  /* 7 days: one row per day */
+  #cal.week {
+    grid-template-columns: max-content max-content max-content 5fr max-content 3fr max-content;
+    gap: 26px 10px; align-items: center; padding: 12px 4px;
+  }
+  .week .date, .week .lo { color: var(--muted); }
+  .week .date { margin-left: -4px; }
+  .week .date, .week .lo, .week .hi, .week .pct { text-align: right; }
+  .week .lo { margin-left: 10px; }
+  .week .range { height: 4px; border-radius: 2px; background: color-mix(in srgb, var(--muted) 22%, transparent); position: relative; }
+  .week .range i { position: absolute; top: 0; bottom: 0; border-radius: 2px; }
+  .week .bar { margin-left: 14px; }
+  .week .pct { font-size: 13px; min-width: 2.6em; }
+
+  /* Month: Monday-first calendar */
+  #cal.month { grid-template-columns: repeat(7, 1fr); gap: 10px 4px; text-align: center; position: relative; }
+  /* Line in the gap between Friday and Saturday */
+  #cal.month::after {
+    content: ''; position: absolute; top: 0; bottom: 0; width: 1px;
+    left: calc((100% - 24px) * 5 / 7 + 17.5px); background: var(--muted); opacity: .35;
+  }
+  .dow { font-size: 11px; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }
+  .day { border-top: 2.5px solid transparent; padding: 6px 0 2px; min-width: 0; min-height: 6.6em; }
+  .day .date { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .day.today .date { color: var(--fg); }
+  .day .hi { font-size: 18px; font-weight: 300; }
+  .day .lo { font-size: 12px; color: var(--muted); }
+  .day .bar { margin: 6px 5px 2px; }
+  .day .pct { font-size: 11px; }
+
+  #summary { color: var(--muted); font-size: 13px; min-height: 1.4em; text-align: center; }
+</style>
+</head>
+<body>
+<button id="place" title="Switch between Bangkok and your location"></button>
+<svg id="clock" viewBox="-100 -100 200 200" role="img" aria-label="12-hour forecast clock"></svg>
+<div id="cal" hidden></div>
+<div id="summary">Loading…</div>
+<nav>
+  <button data-view="clock">Clock</button>
+  <button data-view="week">Week</button>
+  <button data-view="month">Month</button>
+</nav>
+
+<script>
+const BANGKOK = { name: 'Bangkok', lat: 13.7563, lon: 100.5018 };
+const REFETCH_MS = 15 * 60 * 1000;
+const FORECAST_DAYS = 16;   // as far as the forecast reaches
+const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTH = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+let place = BANGKOK, view = 'clock';
+try {
+  place = JSON.parse(localStorage.getItem('place')) || BANGKOK;
+  view = localStorage.getItem('view') || 'clock';
+} catch {}
+let data = null;
+
+const $place = document.getElementById('place');
+const $clock = document.getElementById('clock');
+const $cal = document.getElementById('cal');
+const $summary = document.getElementById('summary');
+const $views = document.querySelectorAll('nav button');
+
+const coords = () => `latitude=${place.lat}&longitude=${place.lon}&timezone=auto`;
+
+async function load() {
+  $place.textContent = place.name;
+  const url = `https://api.open-meteo.com/v1/forecast?${coords()}`
+    + '&current=temperature_2m&hourly=temperature_2m,precipitation_probability'
+    + '&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max'
+    + `&timeformat=unixtime&forecast_days=${FORECAST_DAYS}`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(res.status);
+    data = await res.json();
+    render();
+  } catch (e) {
+    $summary.textContent = 'Could not load forecast. Retrying soon.';
+  }
+}
+
+// Linear interpolation of an hourly series at unix time t
+function at(series, t) {
+  const time = data.hourly.time;
+  const x = Math.max(0, Math.min(series.length - 1, (t - time[0]) / 3600));
+  const i = Math.min(series.length - 2, Math.floor(x));
+  return series[i] + (series[i + 1] - series[i]) * (x - i);
+}
+
+function polar(r, dialHour) {
+  const a = dialHour / 12 * 2 * Math.PI;
+  return [(r * Math.sin(a)).toFixed(2), (-r * Math.cos(a)).toFixed(2)];
+}
+
+// 15°C blue → 26°C yellow → 38°C red
+function tempColor(c) {
+  const mix = (a, b, k) => `color-mix(in oklab, ${b} ${Math.round(Math.max(0, Math.min(1, k)) * 100)}%, ${a})`;
+  return c < 26 ? mix('#4a9fe0', '#ffd95a', (c - 15) / 11) : mix('#ffd95a', '#e5402a', (c - 26) / 12);
+}
+
+function render() {
+  $views.forEach(b => b.setAttribute('aria-pressed', b.dataset.view === view));
+  // SVG elements have no .hidden property, so set the attribute
+  $clock.toggleAttribute('hidden', view !== 'clock');
+  $cal.toggleAttribute('hidden', view === 'clock');
+  if (!data) return;
+  if (view === 'clock') renderClock(); else if (view === 'week') renderWeek(); else renderMonth();
+}
+
+function renderClock() {
+  const temps = data.hourly.temperature_2m;
+  const probs = data.hourly.precipitation_probability;
+  const now = Date.now() / 1000;
+  // Wall-clock time at the forecast location
+  const local = new Date((now + data.utc_offset_seconds) * 1000);
+  const dialNow = local.getUTCHours() % 12 + local.getUTCMinutes() / 60;
+  // Next time a dial position occurs, within the coming 12 hours
+  const timeAt = dialHour => now + (((dialHour - dialNow) % 12 + 12) % 12) * 3600;
+
+  let svg = '';
+  for (let j = 0; j < 60; j++) {
+    const h = j / 5, t = timeAt(h);
+    const p = at(probs, t) / 100;
+    const [x1, y1] = polar(80, h), [x2, y2] = polar(81.5 + 15 * p, h);
+    svg += `<line class="tick" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" opacity="${(0.18 + 0.82 * p).toFixed(2)}"/>`;
+    const [ax, ay] = polar(74, h - 0.105), [bx, by] = polar(74, h + 0.105);
+    svg += `<path d="M${ax} ${ay}A74 74 0 0 1 ${bx} ${by}" fill="none" stroke="${tempColor(at(temps, t))}" stroke-width="2.5"/>`;
+  }
+  for (let n = 0; n < 12; n++) {
+    const [x, y] = polar(62, n);
+    svg += `<text class="label" x="${x}" y="${y}">${Math.round(at(temps, timeAt(n)))}°</text>`;
+  }
+  const [hx1, hy1] = polar(69, dialNow), [hx2, hy2] = polar(98, dialNow);
+  svg += `<line class="hand" x1="${hx1}" y1="${hy1}" x2="${hx2}" y2="${hy2}"/>`;
+  svg += `<text class="now-temp" x="2" y="-4">${Math.round(data.current.temperature_2m)}°</text>`;
+  svg += `<text class="now-rain" y="18">${Math.round(at(probs, now))}% rain</text>`;
+  $clock.innerHTML = svg;
+
+  // Peak rain chance over the next 12 hours
+  let peak = Math.round(at(probs, now)), peakT = now;
+  data.hourly.time.forEach((t, i) => {
+    if (t > now && t <= now + 12 * 3600 && probs[i] > peak) { peak = probs[i]; peakT = t; }
+  });
+  if (peak < 20) {
+    $summary.textContent = 'No rain expected in the next 12 hours';
+  } else {
+    const d = new Date((peakT + data.utc_offset_seconds) * 1000);
+    const hhmm = String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0');
+    $summary.textContent = peakT === now
+      ? `Rain most likely now (${peak}%)`
+      : `Rain most likely around ${hhmm} (${peak}%)`;
+  }
+}
+
+// Daily timestamps are local midnight; shifting by the offset lets the UTC getters read local dates
+const localDate = t => new Date((t + data.utc_offset_seconds) * 1000);
+const deg = v => Math.round(v) + '°';
+const rainFill = p => `<i style="width:${p}%;opacity:${(0.3 + 0.7 * p / 100).toFixed(2)}"></i>`;
+
+// Forecast days from today as { date, hi, lo, rain }
+function days() {
+  const d = data.daily;
+  return d.time.map((t, i) => ({
+    date: localDate(t), hi: d.temperature_2m_max[i], lo: d.temperature_2m_min[i],
+    rain: d.precipitation_probability_max[i] ?? 0,
+  }));
+}
+
+function renderWeek() {
+  const list = days().slice(0, 7);
+  const min = Math.min(...list.map(d => d.lo)), max = Math.max(...list.map(d => d.hi));
+  const pos = v => (v - min) / (max - min || 1) * 100;
+
+  $cal.className = 'week';
+  $cal.innerHTML = list.map((d, i) =>
+    `<div class="name${i === 0 ? ' today' : ''}">${DOW[d.date.getUTCDay()]}</div><div class="date">${d.date.getUTCDate()}</div>`
+    + `<div class="lo">${deg(d.lo)}</div>`
+    + `<div class="range"><i style="left:${pos(d.lo)}%;right:${100 - pos(d.hi)}%;`
+    + `background:linear-gradient(90deg,${tempColor(d.lo)},${tempColor(d.hi)})"></i></div>`
+    + `<div class="hi">${deg(d.hi)}</div>`
+    + `<div class="bar">${rainFill(d.rain)}</div><div class="pct">${d.rain}%</div>`
+  ).join('');
+
+  const wet = list.reduce((a, b) => b.rain > a.rain ? b : a);
+  $summary.textContent = wet.rain < 20
+    ? 'No rain expected in the next 7 days'
+    : `Rain most likely on ${DOW[wet.date.getUTCDay()]} ${wet.date.getUTCDate()} (${wet.rain}%)`;
+}
+
+function renderMonth() {
+  const list = days();
+  const lead = (list[0].date.getUTCDay() + 6) % 7;   // cells between Monday and today
+
+  let html = [1, 2, 3, 4, 5, 6, 0].map(n => `<div class="dow">${DOW[n]}</div>`).join('');
+  html += '<div></div>'.repeat(lead);
+  list.forEach((d, i) => {
+    const n = d.date.getUTCDate();
+    html += `<div class="day${i === 0 ? ' today' : ''}" style="border-color:${tempColor(d.hi)}">`
+      + `<div class="date">${i === 0 || n === 1 ? `${n} ${MONTH[d.date.getUTCMonth()]}` : n}</div>`
+      + `<div class="hi">${deg(d.hi)}</div><div class="lo">${deg(d.lo)}</div>`
+      + `<div class="bar">${rainFill(d.rain)}</div><div class="pct">${d.rain}%</div></div>`;
+  });
+  $cal.className = 'month';
+  $cal.innerHTML = html;
+  $summary.textContent = `Forecast covers the next ${list.length} days`;
+}
+
+function setPlace(p) {
+  place = p;
+  try { localStorage.setItem('place', JSON.stringify(p)); } catch {}
+  load();
+}
+
+$place.addEventListener('click', () => {
+  if (place.name !== BANGKOK.name || !navigator.geolocation) return setPlace(BANGKOK);
+  $place.textContent = 'Locating…';
+  navigator.geolocation.getCurrentPosition(
+    pos => setPlace({ name: 'My location', lat: +pos.coords.latitude.toFixed(3), lon: +pos.coords.longitude.toFixed(3) }),
+    () => { $place.textContent = place.name; $summary.textContent = 'Location unavailable'; }
+  );
+});
+
+$views.forEach(b => b.addEventListener('click', () => {
+  view = b.dataset.view;
+  try { localStorage.setItem('view', view); } catch {}
+  render();
+}));
+
+render();
+load();
+setInterval(load, REFETCH_MS);
+setInterval(render, 60 * 1000);
+</script>
+</body>
+</html>
