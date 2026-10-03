@@ -37,23 +37,26 @@
   }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
+  html, body { height: 100%; overflow: hidden; }
   body {
-    min-height: 100dvh; margin: 0;
+    height: 100dvh; margin: 0;
     background: var(--bg); color: var(--fg);
     font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Sukhumvit Set", sans-serif;
     display: flex; flex-direction: column; align-items: center;
-    padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
-             max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+    padding: max(16px, env(safe-area-inset-top)) 0 max(16px, env(safe-area-inset-bottom));
     -webkit-tap-highlight-color: transparent;
   }
-  /* Place and view switcher keep their position whatever the view's height */
-  header {
-    position: sticky; top: 0; z-index: 1; width: 100%; background: var(--bg);
-    display: flex; flex-direction: column; align-items: center; gap: 2px; padding-bottom: 8px;
-  }
+  header { display: flex; flex-direction: column; align-items: center; gap: 2px; padding-bottom: 8px; }
+  /* Views sit side by side; swiping sideways snaps from one to the next */
   main {
-    flex: 1; width: 100%;
+    flex: 1; min-height: 0; width: 100%; display: flex;
+    overflow: auto hidden; scroll-snap-type: x mandatory; overscroll-behavior: contain; scrollbar-width: none;
+  }
+  main::-webkit-scrollbar { display: none; }
+  section {
+    flex: 0 0 100%; scroll-snap-align: center; scroll-snap-stop: always; overflow: hidden;
     display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+    padding: 0 max(16px, env(safe-area-inset-right)) 0 max(16px, env(safe-area-inset-left));
   }
   button {
     font: inherit; color: var(--muted); background: none; border: 0; padding: 6px 10px;
@@ -68,14 +71,14 @@
   .tick { stroke: var(--rain); stroke-width: 1.6; stroke-linecap: round; }
   .hand { stroke: var(--fg); stroke-width: 1; stroke-linecap: round; }
 
-  #cal { width: min(100%, 520px); display: grid; font-variant-numeric: tabular-nums; }
+  .cal { width: min(100%, 520px); display: grid; font-variant-numeric: tabular-nums; }
   .name.today, .day.today .date { font-weight: 600; }
   .bar { height: 3px; border-radius: 2px; background: color-mix(in srgb, var(--rain) 16%, transparent); }
   .bar i { display: block; height: 100%; border-radius: 2px; background: var(--rain); }
   .pct { color: var(--rain); }
 
   /* 7 days: one row per day */
-  #cal.week {
+  .cal.week {
     grid-template-columns: max-content max-content max-content 5fr max-content 3fr max-content;
     gap: 26px 10px; align-items: center; padding: 12px 4px;
   }
@@ -89,9 +92,9 @@
   .week .pct { font-size: 13px; min-width: 2.6em; }
 
   /* Month: Monday-first calendar */
-  #cal.month { grid-template-columns: repeat(7, 1fr); gap: 10px 4px; text-align: center; position: relative; }
+  .cal.month { grid-template-columns: repeat(7, 1fr); gap: 10px 4px; text-align: center; position: relative; }
   /* Line in the gap between Friday and Saturday */
-  #cal.month::after {
+  .cal.month::after {
     content: ''; position: absolute; top: 0; bottom: 0; width: 1px;
     left: calc((100% - 24px) * 5 / 7 + 17.5px); background: var(--muted); opacity: .35;
   }
@@ -104,7 +107,7 @@
   .day .bar { margin: 6px 5px 2px; }
   .day .pct { font-size: 11px; }
 
-  #summary { color: var(--muted); font-size: 13px; min-height: 1.4em; text-align: center; }
+  .summary { color: var(--muted); font-size: 13px; min-height: 1.4em; text-align: center; }
 </style>
 </head>
 <body>
@@ -117,9 +120,18 @@
   </nav>
 </header>
 <main>
-  <svg id="clock" viewBox="-100 -100 200 200" role="img" aria-label="12-hour forecast clock"></svg>
-  <div id="cal" hidden></div>
-  <div id="summary">Loading…</div>
+  <section>
+    <svg id="clock" viewBox="-100 -100 200 200" role="img" aria-label="12-hour forecast clock"></svg>
+    <div class="summary">Loading…</div>
+  </section>
+  <section>
+    <div class="cal week"></div>
+    <div class="summary"></div>
+  </section>
+  <section>
+    <div class="cal month"></div>
+    <div class="summary"></div>
+  </section>
 </main>
 
 <script>
@@ -129,18 +141,25 @@ const FORECAST_DAYS = 16;   // as far as the forecast reaches
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTH = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-let place = BANGKOK, view = 'clock';
+const VIEWS = ['clock', 'week', 'month'];   // left to right, matching the sections in <main>
+
+let place = BANGKOK, view = 0;
 try {
   place = JSON.parse(localStorage.getItem('place')) || BANGKOK;
-  view = localStorage.getItem('view') || 'clock';
+  view = Math.max(0, VIEWS.indexOf(localStorage.getItem('view')));
 } catch {}
 let data = null;
 
 const $place = document.getElementById('place');
 const $clock = document.getElementById('clock');
-const $cal = document.getElementById('cal');
-const $summary = document.getElementById('summary');
+const $main = document.querySelector('main');
+const $week = document.querySelector('.cal.week');
+const $month = document.querySelector('.cal.month');
+const $summaries = document.querySelectorAll('.summary');
 const $views = document.querySelectorAll('nav button');
+
+// Status line shown under every view
+const say = text => $summaries.forEach(el => el.textContent = text);
 
 const coords = () => `latitude=${place.lat}&longitude=${place.lon}&timezone=auto`;
 
@@ -156,7 +175,7 @@ async function load() {
     data = await res.json();
     render();
   } catch (e) {
-    $summary.textContent = 'Could not load forecast. Retrying soon.';
+    say('Could not load forecast. Retrying soon.');
   }
 }
 
@@ -180,12 +199,10 @@ function tempColor(c) {
 }
 
 function render() {
-  $views.forEach(b => b.setAttribute('aria-pressed', b.dataset.view === view));
-  // SVG elements have no .hidden property, so set the attribute
-  $clock.toggleAttribute('hidden', view !== 'clock');
-  $cal.toggleAttribute('hidden', view === 'clock');
   if (!data) return;
-  if (view === 'clock') renderClock(); else if (view === 'week') renderWeek(); else renderMonth();
+  renderClock();
+  renderWeek();
+  renderMonth();
 }
 
 function renderClock() {
@@ -223,11 +240,11 @@ function renderClock() {
     if (t > now && t <= now + 12 * 3600 && probs[i] > peak) { peak = probs[i]; peakT = t; }
   });
   if (peak < 20) {
-    $summary.textContent = 'No rain expected in the next 12 hours';
+    $summaries[0].textContent = 'No rain expected in the next 12 hours';
   } else {
     const d = new Date((peakT + data.utc_offset_seconds) * 1000);
     const hhmm = String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0');
-    $summary.textContent = peakT === now
+    $summaries[0].textContent = peakT === now
       ? `Rain most likely now (${peak}%)`
       : `Rain most likely around ${hhmm} (${peak}%)`;
   }
@@ -252,8 +269,7 @@ function renderWeek() {
   const min = Math.min(...list.map(d => d.lo)), max = Math.max(...list.map(d => d.hi));
   const pos = v => (v - min) / (max - min || 1) * 100;
 
-  $cal.className = 'week';
-  $cal.innerHTML = list.map((d, i) =>
+  $week.innerHTML = list.map((d, i) =>
     `<div class="name${i === 0 ? ' today' : ''}">${DOW[d.date.getUTCDay()]}</div><div class="date">${d.date.getUTCDate()}</div>`
     + `<div class="lo">${deg(d.lo)}</div>`
     + `<div class="range"><i style="left:${pos(d.lo)}%;right:${100 - pos(d.hi)}%;`
@@ -263,7 +279,7 @@ function renderWeek() {
   ).join('');
 
   const wet = list.reduce((a, b) => b.rain > a.rain ? b : a);
-  $summary.textContent = wet.rain < 20
+  $summaries[1].textContent = wet.rain < 20
     ? 'No rain expected in the next 7 days'
     : `Rain most likely on ${DOW[wet.date.getUTCDay()]} ${wet.date.getUTCDate()} (${wet.rain}%)`;
 }
@@ -281,9 +297,8 @@ function renderMonth() {
       + `<div class="hi">${deg(d.hi)}</div><div class="lo">${deg(d.lo)}</div>`
       + `<div class="bar">${rainFill(d.rain)}</div><div class="pct">${d.rain}%</div></div>`;
   });
-  $cal.className = 'month';
-  $cal.innerHTML = html;
-  $summary.textContent = `Forecast covers the next ${list.length} days`;
+  $month.innerHTML = html;
+  $summaries[2].textContent = `Forecast covers the next ${list.length} days`;
 }
 
 function setPlace(p) {
@@ -297,17 +312,31 @@ $place.addEventListener('click', () => {
   $place.textContent = 'Locating…';
   navigator.geolocation.getCurrentPosition(
     pos => setPlace({ name: 'My location', lat: +pos.coords.latitude.toFixed(3), lon: +pos.coords.longitude.toFixed(3) }),
-    () => { $place.textContent = place.name; $summary.textContent = 'Location unavailable'; }
+    () => { $place.textContent = place.name; say('Location unavailable'); }
   );
 });
 
-$views.forEach(b => b.addEventListener('click', () => {
-  view = b.dataset.view;
-  try { localStorage.setItem('view', view); } catch {}
-  render();
-}));
+function setView(i) {
+  view = i;
+  $views.forEach((b, j) => b.setAttribute('aria-pressed', j === i));
+  try { localStorage.setItem('view', VIEWS[i]); } catch {}
+}
 
-render();
+const scrollToView = (i, behavior) => $main.scrollTo({ left: i * $main.clientWidth, behavior });
+
+$views.forEach((b, i) => b.addEventListener('click', () => scrollToView(i, 'smooth')));
+$main.addEventListener('scroll', () => {
+  const i = Math.round($main.scrollLeft / $main.clientWidth);
+  if (i !== view && VIEWS[i]) setView(i);
+});
+addEventListener('resize', () => scrollToView(view, 'instant'));
+addEventListener('keydown', e => {
+  const step = { ArrowLeft: -1, ArrowRight: 1 }[e.key];
+  if (step && VIEWS[view + step]) scrollToView(view + step, 'smooth');
+});
+
+setView(view);
+scrollToView(view, 'instant');
 load();
 setInterval(load, REFETCH_MS);
 setInterval(render, 60 * 1000);
